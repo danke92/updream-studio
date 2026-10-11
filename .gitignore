@@ -1,0 +1,16 @@
+# 归档数据与采集产物（含图片/视频/缩略图，体积大，不入库）
+data/
+
+# Python 虚拟环境
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.py[cod]
+
+# 日志与系统文件
+*.log
+.DS_Store
+Thumbs.db
+_shot*.png
+_clip.png
