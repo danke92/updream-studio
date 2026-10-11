@@ -15,6 +15,7 @@
   let dragDepth = 0;
   let pollTimer = null;
   let LINK_RUNNING = { updream: false, libtv: false };   // 任一链路在线才轮询状态
+  let PUBLIC_MODE = false;      // 公用素材库模式：无登录页，所有人共用一套库
 
   /* ============================================================
      数据
@@ -683,17 +684,33 @@
     try {
       const r = await api('/api/auth/me');
       ACCOUNTS = r.accounts || [];
+      PUBLIC_MODE = !!r.publicMode;
       if (r.ok && r.user) {
         ME = r.user;
         authClose();
         paintAccount();
+        applyPublicMode();
         return true;
       }
     } catch (e) { /* 服务未响应 */ }
     ME = null;
     paintAccount();
+    applyPublicMode();
     authOpen();
     return false;
+  }
+
+  /* 公用模式：顶栏账户入口不再可切换，只作为「公用素材库」标识 */
+  function applyPublicMode() {
+    const chip = $('btnAccount'), menu = $('accMenu');
+    if (!PUBLIC_MODE) return;
+    if (menu) menu.hidden = true;
+    const av = $('accAvatar'), nm = $('accName');
+    if (av) av.textContent = '公';
+    if (nm) nm.textContent = (ME && ME.name) ? ME.name : '公用素材库';
+    const sw = $('accSwitch'), del = $('accDelete'), ph = $('amPhone');
+    [sw, del, ph].forEach(el => { if (el) el.hidden = true; });
+    if (chip) { chip.title = '公用素材库 · 所有人共用'; chip.style.cursor = 'default'; }
   }
 
   async function doLogin(phone, name) {
@@ -790,6 +807,7 @@
 
     /* 顶栏账户菜单 */
     $('btnAccount').addEventListener('click', function (e) {
+      if (PUBLIC_MODE) return;          // 公用模式没有账户可切换
       e.stopPropagation();
       const m = $('accMenu');
       m.hidden = !m.hidden;

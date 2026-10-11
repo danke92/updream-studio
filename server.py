@@ -15,6 +15,36 @@ WEB = os.path.join(ROOT, 'web')
 DATA = os.path.join(ROOT, 'data')
 ACCOUNTS = os.path.join(DATA, 'accounts')      # 每个手机号 = 一个完全独立的素材库
 ACC_INDEX = os.path.join(DATA, 'accounts.json')
+CONFIG_PATH = os.path.join(DATA, 'config.json')   # 运行模式（公用 / 分账户）
+
+# 公用模式：不显示登录页，所有访问者共用同一个素材库
+DEFAULT_CONFIG = {'publicMode': True, 'publicName': '公用素材库'}
+
+
+def load_config():
+    cfg = dict(DEFAULT_CONFIG)
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
+                cfg.update(json.load(f) or {})
+        except Exception as e:
+            print('[warn] config.json 读取失败:', e)
+    return cfg
+
+
+CONFIG = load_config()
+PUBLIC_MODE = bool(CONFIG.get('publicMode', True))
+PUBLIC_NAME = str(CONFIG.get('publicName') or '公用素材库')
+if os.environ.get('NS_PUBLIC') in ('0', '1'):
+    PUBLIC_MODE = os.environ['NS_PUBLIC'] == '1'
+
+
+def save_config(cfg=None):
+    cfg = cfg or {'publicMode': PUBLIC_MODE, 'publicName': PUBLIC_NAME}
+    tmp = CONFIG_PATH + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, CONFIG_PATH)
 
 for d in (DATA, ACCOUNTS):
     os.makedirs(d, exist_ok=True)
@@ -554,13 +584,37 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         return ''
 
     def _acc(self):
-        """当前登录账户（None = 未登录）"""
+        """当前登录账户（None = 未登录）。公用模式下恒返回共享库"""
+        if PUBLIC_MODE:
+            return get_account(DEFAULT_PHONE, create=True, name=PUBLIC_NAME)
         tok = self._cookie('ns_session')
         phone = SESSIONS.get(tok)
         if not phone:
             return None
         with _ACC_LOCK:
             return _ACC.get(phone)
+
+    def serve_index(self):
+        """首页：公用模式下直接把登录层标记为隐藏，避免登录页一闪而过"""
+        fp = os.path.join(ROOT, 'web', 'index.html')
+        try:
+            with open(fp, 'rb') as f:
+                body = f.read()
+        except Exception:
+            self.send_error(404)
+            return
+        if PUBLIC_MODE:
+            body = body.replace(b'<div class="auth" id="authScreen">',
+                                b'<div class="auth" id="authScreen" hidden>')
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/html; charset=utf-8')
+        self.send_header('Content-Length', str(len(body)))
+        self.send_header('Cache-Control', 'no-store')
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except Exception:
+            pass
 
     def need_acc(self):
         a = self._acc()
@@ -573,17 +627,22 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
         p = urllib.parse.urlparse(self._norm()).path
 
-        if p == '/':
-            self.path = '/index.html'
-            return super().do_GET()
+        if p == '/' or p == '/index.html':
+            return self.serve_index()
 
         # === 账户 / 登录 ===
         if p == '/api/auth/me':
             a = self._acc()
+            info = a.info() if a else None
+            if info is not None and PUBLIC_MODE:
+                info['name'] = PUBLIC_NAME
+                info['public'] = True
             return self._json({
                 'ok': a is not None,
-                'user': a.info() if a else None,
-                'accounts': [x.info() for x in sorted(_ACC.values(), key=lambda v: -v.lastAt)],
+                'user': info,
+                'publicMode': PUBLIC_MODE,
+                'accounts': [] if PUBLIC_MODE else
+                    [x.info() for x in sorted(_ACC.values(), key=lambda v: -v.lastAt)],
             })
 
         if p == '/api/auth/check':
@@ -611,8 +670,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             with acc.lock:
                 assets = list(acc.lib['assets'])
             chars, scenes, seqs = build_groups(assets)
+            u = acc.info()
+            if PUBLIC_MODE:
+                u['name'] = PUBLIC_NAME
+                u['public'] = True
             return self._json({
-                'user': acc.info(),
+                'user': u,
                 'assets': sorted(assets, key=lambda a: -a.get('updatedAt', 0)),
                 'characters': chars, 'scenes': scenes, 'sequences': seqs,
                 'projects': acc.lib.get('projects', []),
@@ -1085,6 +1148,11 @@ def main():
         print('  其它设备: http://%s:%d/   （同一 WiFi / 局域网）' % (lan, PORT))
         print('           连不上就先双击 allow-lan.bat 放行防火墙')
     print('  监听:     0.0.0.0:%d' % PORT)
+    if PUBLIC_MODE:
+        print('  模式:     公用素材库（无登录页，所有人共用「%s」）' % PUBLIC_NAME)
+    else:
+        print('  模式:     分账户（手机号登录，各自独立素材库）')
+    print('  改模式:   编辑 data/config.json 里的 publicMode（true/false）后重启')
     print('=' * 58)
     try:
         threading.Timer(1.2, lambda: webbrowser.open(url)).start()
@@ -1098,4 +1166,8 @@ def main():
 
 
 if __name__ == '__main__':
+    if not os.path.exists(CONFIG_PATH):
+        save_config()          # 首次运行写出默认配置，方便手动切换模式
+    if PUBLIC_MODE and DEFAULT_PHONE not in _ACC:
+        get_account(DEFAULT_PHONE, create=True, name=PUBLIC_NAME)
     main()
