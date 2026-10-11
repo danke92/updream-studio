@@ -18,7 +18,8 @@ ACC_INDEX = os.path.join(DATA, 'accounts.json')
 CONFIG_PATH = os.path.join(DATA, 'config.json')   # 运行模式（公用 / 分账户）
 
 # 公用模式：不显示登录页，所有访问者共用同一个素材库
-DEFAULT_CONFIG = {'publicMode': True, 'publicName': '公用素材库'}
+# accessCode：访问口令（留空 = 不设口令）。每台设备首次输入一次，之后记住一年
+DEFAULT_CONFIG = {'publicMode': True, 'publicName': '公用素材库', 'accessCode': ''}
 
 
 def load_config():
@@ -38,9 +39,16 @@ PUBLIC_NAME = str(CONFIG.get('publicName') or '公用素材库')
 if os.environ.get('NS_PUBLIC') in ('0', '1'):
     PUBLIC_MODE = os.environ['NS_PUBLIC'] == '1'
 
+# ---- 访问口令 ----
+ACCESS_CODE = str(CONFIG.get('accessCode') or '')
+GATE_ENABLED = bool(ACCESS_CODE)
+# cookie 里存的是口令的哈希，重启后依然有效，且无法反推出口令
+GATE_OK = hashlib.sha256(('ns-gate|' + ACCESS_CODE).encode('utf-8')).hexdigest() if GATE_ENABLED else ''
+GATE_MAX_AGE = 60 * 60 * 24 * 365      # 一年，每台设备只需输一次
+
 
 def save_config(cfg=None):
-    cfg = cfg or {'publicMode': PUBLIC_MODE, 'publicName': PUBLIC_NAME}
+    cfg = cfg or {'publicMode': PUBLIC_MODE, 'publicName': PUBLIC_NAME, 'accessCode': ACCESS_CODE}
     tmp = CONFIG_PATH + '.tmp'
     with open(tmp, 'w', encoding='utf-8') as f:
         json.dump(cfg, f, ensure_ascii=False, indent=1)
@@ -594,6 +602,23 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         with _ACC_LOCK:
             return _ACC.get(phone)
 
+    # ---------- 访问口令 ----------
+    def _gate_ok(self):
+        """口令是否已通过（未启用口令时恒为 True）"""
+        if not GATE_ENABLED:
+            return True
+        return bool(GATE_OK) and self._cookie('ns_gate') == GATE_OK
+
+    def _gate_block(self):
+        return self._json({'ok': False, 'code': 401, 'gate': True,
+                           'error': '需要访问口令'}, 401)
+
+    def _gated(self, p):
+        """该路径是否需要先过口令"""
+        if not GATE_ENABLED or p == '/api/gate':
+            return False
+        return p.startswith('/api/') or p in ('/media', '/file')
+
     def serve_index(self):
         """首页：公用模式下直接把登录层标记为隐藏，避免登录页一闪而过"""
         fp = os.path.join(ROOT, 'web', 'index.html')
@@ -606,6 +631,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if PUBLIC_MODE:
             body = body.replace(b'<div class="auth" id="authScreen">',
                                 b'<div class="auth" id="authScreen" hidden>')
+        if GATE_ENABLED and not self._gate_ok():
+            # 需要口令时直接显示口令层，避免先闪一下工作台
+            body = body.replace(b'<div class="auth" id="gateScreen" hidden>',
+                                b'<div class="auth" id="gateScreen">')
         self.send_response(200)
         self.send_header('Content-Type', 'text/html; charset=utf-8')
         self.send_header('Content-Length', str(len(body)))
@@ -629,6 +658,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
         if p == '/' or p == '/index.html':
             return self.serve_index()
+
+        # === 访问口令 ===
+        if self._gated(p) and not self._gate_ok():
+            return self._gate_block()
+        if p == '/api/gate':
+            return self._json({'ok': True, 'enabled': GATE_ENABLED,
+                               'passed': self._gate_ok()})
 
         # === 账户 / 登录 ===
         if p == '/api/auth/me':
@@ -734,6 +770,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         p = urllib.parse.urlparse(self._norm()).path
         q = self._q()
         body = self._body()
+
+        # === 访问口令 ===
+        if p == '/api/gate':
+            try:
+                d = json.loads(body.decode('utf-8') or b'{}')
+            except Exception:
+                d = {}
+            if str(d.get('code', '')).strip() == ACCESS_CODE:
+                return self._json({'ok': True}, headers={
+                    'Set-Cookie': 'ns_gate=%s; Path=/; HttpOnly; SameSite=Lax; Max-Age=%d'
+                                  % (GATE_OK, GATE_MAX_AGE)})
+            return self._json({'ok': False, 'msg': '口令不正确'}, 401)
+        if self._gated(p) and not self._gate_ok():
+            return self._gate_block()
 
         # === 登录 / 账户管理 ===
         if p == '/api/auth/login':

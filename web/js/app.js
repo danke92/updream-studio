@@ -60,8 +60,9 @@
   async function load(quiet) {
     try {
       DATA = await api('/api/library');
-      if (DATA && DATA.code === 401) {          // 会话失效 → 回到登录
-        ME = null; paintAccount(); authOpen();
+      if (DATA && DATA.code === 401) {
+        if (DATA.gate) { gateOpen(); return; }   // 口令失效 → 重新输入
+        ME = null; paintAccount(); authOpen();   // 会话失效 → 回到登录
         return;
       }
       if (DATA && DATA.user) { ME = DATA.user; paintAccount(); }
@@ -680,9 +681,57 @@
 
   function closeAccMenu() { const m = $('accMenu'); if (m) m.hidden = true; }
 
+  /* ---------- 访问口令（config.json 里 accessCode 为空则永不出现） ---------- */
+  function gateOpen(msg) {
+    const s = $('gateScreen');
+    if (!s) return false;
+    if (msg) { $('gateErr').textContent = msg; $('gateErr').hidden = false; }
+    else $('gateErr').hidden = true;
+    s.hidden = false;
+    setTimeout(function () { try { $('gateInput').focus(); } catch (e) { } }, 80);
+    return true;
+  }
+  function gateClose() { const s = $('gateScreen'); if (s) s.hidden = true; }
+
+  async function gateSubmit(code) {
+    try {
+      const r = await api('/api/gate', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: code }),
+      });
+      if (r && r.ok) { gateClose(); return true; }
+      const e = $('gateErr');
+      e.textContent = (r && r.msg) || '口令不正确';
+      e.hidden = false;
+      return false;
+    } catch (err) {
+      const e = $('gateErr');
+      e.textContent = '无法连接本地服务：' + (err && err.message ? err.message : '');
+      e.hidden = false;
+      return false;
+    }
+  }
+
+  function bindGate() {
+    const f = $('gateForm');
+    if (!f) return;
+    f.addEventListener('submit', async function (e) {
+      e.preventDefault();
+      const v = ($('gateInput').value || '').trim();
+      if (!v) { $('gateErr').textContent = '请输入访问口令'; $('gateErr').hidden = false; return; }
+      $('gateGoText').textContent = '验证中…';
+      const ok = await gateSubmit(v);
+      $('gateGoText').textContent = '进入';
+      if (!ok) return;
+      $('gateInput').value = '';
+      if (await ensureSession()) await load();
+    });
+  }
+
   async function ensureSession() {
     try {
       const r = await api('/api/auth/me');
+      if (r && r.gate) { gateOpen(); return false; }   // 需要口令
       ACCOUNTS = r.accounts || [];
       PUBLIC_MODE = !!r.publicMode;
       if (r.ok && r.user) {
@@ -885,6 +934,7 @@
   async function init() {
     bind();
     bindAuth();
+    bindGate();
     fillSubOptions();
     if (!(await ensureSession())) {
       clock();
