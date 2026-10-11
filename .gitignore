@@ -14,3 +14,7 @@ __pycache__/
 Thumbs.db
 _shot*.png
 _clip.png
+
+# 隧道日志与下载的可执行文件
+_tun.log
+tools/*.exe
